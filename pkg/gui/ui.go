@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -18,9 +20,10 @@ import (
 )
 
 var (
-	app        *tview.Application // The tview application.
-	bucketName string
-	envName    string
+	app          *tview.Application
+	bucketName   string
+	envName      string
+	currentFocus string // allows refocusing when exiting forms/new app state
 )
 
 type awsCreds struct {
@@ -30,11 +33,45 @@ type awsCreds struct {
 	sso             string
 }
 
+func spinTitle(app *tview.Application, box *tview.List, title string, action func()) {
+	done := make(chan bool)
+
+	// Remember the original title
+	originalTitle := box.GetTitle()
+
+	// action
+	go func() {
+		action()
+		done <- true
+		close(done)
+	}()
+
+	// spinner
+	go func() {
+		spinners := []string{"/", "|", "\\", "-", "/"}
+		var i int
+		for {
+			select {
+			case _ = <-done:
+				app.QueueUpdateDraw(func() {
+					box.SetTitle(originalTitle) // Restore original title
+				})
+				return
+			case <-time.After(100 * time.Millisecond):
+				spin := i % len(spinners)
+				app.QueueUpdateDraw(func() {
+					box.SetTitle(title + spinners[spin])
+				})
+				i++
+			}
+		}
+	}()
+}
+
 func usage() {
 	fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s:\n", os.Args[0])
 	flag.PrintDefaults()
 
-	// Add descriptions for positional arguments
 	fmt.Println("\nPositional Arguments:")
 	fmt.Println("  arg1        AWS Access Key ID")
 	fmt.Println("  arg2        AWS Secret Access Key")
@@ -69,7 +106,7 @@ func getAWSCredentialProfiles() []awsCreds {
 			credStruct.secretAccessKey = strings.Split(line, " ")[2]
 		} else if strings.HasPrefix(line, "sso") {
 			credStruct.sso = strings.Split(line, " ")[2]
-		} else if line == "" {
+		} else if line == "\n" || line == "" {
 			if credStruct != (awsCreds{}) {
 				profiles = append(profiles, credStruct)
 				credStruct = awsCreds{}
@@ -140,8 +177,6 @@ func main() {
 				}
 				envName = cred.name
 
-				// Do something with awsConfig and envName
-				fmt.Println("Found profile:", envName)
 				found = true
 				break
 			}
@@ -221,8 +256,6 @@ func main() {
 		selectedKey, _ := files.GetItemText(selectedItemIndex)
 		switch event.Key() {
 		case tcell.KeyCtrlD:
-			// selectedItemIndex := files.GetCurrentItem()
-			// selectedKey, _ := files.GetItemText(selectedItemIndex)
 			input := &s3.DeleteObjectInput{
 				Bucket: aws.String(bucketName),
 				Key:    aws.String(selectedKey),
@@ -286,9 +319,73 @@ func main() {
 
 			renameInput.SetDoneFunc(func(key tcell.Key) {
 				if key == tcell.KeyEnter {
-					// when pressed enter remove search bar with previous footer
-					// Add the previous footer
-					// inputText := renameInput.GetText()
+					// A rename is a copy + delete + refresh list
+					// COPY
+					sourceKey := "/" + bucketName + "/" + selectedKey
+					input := &s3.CopyObjectInput{
+						Bucket:     aws.String(bucketName),
+						CopySource: aws.String(sourceKey),
+						Key:        aws.String(renameInput.GetText()),
+					}
+
+					_, err := svc.CopyObject(input)
+					if err != nil {
+						if aerr, ok := err.(awserr.Error); ok {
+							switch aerr.Code() {
+							case s3.ErrCodeObjectNotInActiveTierError:
+								fmt.Println(s3.ErrCodeObjectNotInActiveTierError, aerr.Error())
+							default:
+								fmt.Println(aerr.Error())
+							}
+						} else {
+							// Print the error, cast err to awserr.Error to get the Code and
+							// Message from an error.
+							fmt.Println(err.Error())
+						}
+						return
+					}
+					// DELETE
+					deleteInput := &s3.DeleteObjectInput{
+						Bucket: aws.String(bucketName),
+						Key:    aws.String(selectedKey),
+					}
+
+					_, err = svc.DeleteObject(deleteInput)
+					if err != nil {
+						if aerr, ok := err.(awserr.Error); ok {
+							switch aerr.Code() {
+							default:
+								fmt.Println(aerr.Error())
+							}
+						} else {
+							// Print the error, cast err to awserr.Error to get the Code and
+							// Message from an error.
+							fmt.Println(err.Error())
+						}
+						return
+					}
+					// UPDATE Files view
+					input2 := &s3.ListObjectsV2Input{
+						Bucket:  aws.String(bucketName),
+						MaxKeys: aws.Int64(1000),
+					}
+
+					result, err := svc.ListObjectsV2(input2)
+					if err != nil {
+						panic(err)
+					}
+					files.Clear()
+					preview.Clear()
+					app.SetFocus(files)
+					files.SetBorderColor(tcell.ColorYellow)
+					buckets.SetBorderColor(tcell.ColorWhite)
+					for _, val := range result.Contents {
+						if *val.Size == 0 {
+							continue
+						}
+						files.AddItem(*val.Key, "", 0, nil)
+					}
+
 					grid := tview.NewGrid().
 						SetRows(1, 0, 1).
 						SetColumns(50, 50, 0).
@@ -299,7 +396,7 @@ func main() {
 							SetText(""), 0, 0, 1, 3, 0, 0, false).
 						AddItem(tview.NewTextView().
 							SetTextAlign(tview.AlignLeft).
-							SetDynamicColors(true).SetText(fmt.Sprintf("Credentials: [yellow]%s[white] - Shortcuts: ([green]/[white])search | ([green]ESC[white])ape | <[green]Ctrl+[white]> ([green]h[white])elp | ([green]c[white])redentials | ([green]a[white])dd Credentials | ([green]d[white])elete | ([green]r[white])ename | ([green]u[white])pload", envName)), 2, 0, 1, 3, 0, 0, false)
+							SetDynamicColors(true).SetText(fmt.Sprintf("Credentials: [yellow]%s[white] - Shortcuts: ([green]/[white])search | ([green]ESC[white])ape | <[green]Ctrl+[white]> ([green]c[white])reate bucket | ([green]a[white])dd Credentials | ([green]d[white])elete | ([green]r[white])ename | ([green]u[white])pload | ([green]s[white])wap credentials", envName)), 2, 0, 1, 3, 0, 0, false)
 
 					// Add items to the grid
 					grid.AddItem(buckets, 1, 0, 1, 1, 0, 100, false).
@@ -344,7 +441,7 @@ func main() {
 		SetColumns(50, 50, 0).
 		SetBorders(false).
 		AddItem(newPrimitive(""), 0, 0, 1, 3, 0, 0, false).
-		AddItem(newPrimitive(fmt.Sprintf("Credentials: [yellow]%s[white] - Shortcuts: ([green]/[white])search | ([green]ESC[white])ape | <[green]Ctrl+[white]> ([green]h[white])elp | ([green]c[white])redentials | ([green]a[white])dd Credentials | ([green]d[white])elete | ([green]r[white])ename | ([green]u[white])pload", envName)), 2, 0, 1, 3, 0, 0, false)
+		AddItem(newPrimitive(fmt.Sprintf("Credentials: [yellow]%s[white] - Shortcuts: ([green]/[white])search | ([green]ESC[white])ape | <[green]Ctrl+[white]> ([green]c[white])reate bucket | ([green]a[white])dd Credentials | ([green]d[white])elete | ([green]r[white])ename | ([green]u[white])pload | ([green]s[white])wap credentials", envName)), 2, 0, 1, 3, 0, 0, false)
 
 	// // Layout for screens narrower than 100 cells (menu and side bar are hidden).
 	// grid.AddItem(buckets, 0, 0, 0, 0, 0, 0, false).
@@ -363,32 +460,75 @@ func main() {
 			buckets.SetBorderColor(tcell.ColorYellow)
 			files.SetBorderColor(tcell.ColorWhite)
 			preview.SetBorderColor(tcell.ColorWhite)
+			currentFocus = "buckets"
 		case tcell.KeyCtrlF:
 			app.SetFocus(files)
 			files.SetBorderColor(tcell.ColorYellow)
 			buckets.SetBorderColor(tcell.ColorWhite)
 			preview.SetBorderColor(tcell.ColorWhite)
+			currentFocus = "files"
 		case tcell.KeyCtrlP:
 			app.SetFocus(preview)
 			preview.SetBorderColor(tcell.ColorYellow)
 			buckets.SetBorderColor(tcell.ColorWhite)
 			files.SetBorderColor(tcell.ColorWhite)
-		case tcell.KeyCtrlC:
+			currentFocus = "preview"
+		case tcell.KeyCtrlA:
 			form := tview.NewForm().
 				AddInputField("Name", "", 40, nil, nil).
 				AddInputField("Access Key", "", 40, nil, nil).
 				AddPasswordField("Secret Access Key", "", 40, '*', nil).
 				AddInputField("SSO (Optional)", "", 40, nil, nil).
-				AddTextView("Note", "Credentials will be stored inside\n.aws/credentials", 40, 2, true, false).
-				AddButton("Save", func() {
-					// add env logic here
-					app.SetRoot(grid, true).EnableMouse(true).Run()
-				}).
-				AddButton("Quit", func() {
-					app.SetRoot(grid, true).EnableMouse(true).Run()
+				AddTextView("Note", "Credentials will be stored inside\n.aws/credentials.\nCtrl+Shift+v to paste", 40, 3, true, false)
+
+			form.AddButton("Save", func() {
+				// TODO: Probably make this a function
+				profileName := form.GetFormItem(0).(*tview.InputField).GetText()
+				accessKeyInput := form.GetFormItem(1).(*tview.InputField).GetText()
+				secretAccessKeyInput := form.GetFormItem(2).(*tview.InputField).GetText()
+
+				if profileName == "" || accessKeyInput == "" || secretAccessKeyInput == "" {
+					app.SetRoot(grid, true).EnableMouse(false).Run()
+				}
+
+				awsCredentialsFile := os.Getenv("HOME") + "/.aws/credentials"
+				file, err := os.OpenFile(awsCredentialsFile, os.O_APPEND|os.O_WRONLY, 0644)
+				if err != nil {
+					panic("This is not good")
+				}
+				defer file.Close()
+
+				writer := bufio.NewWriter(file)
+				_, err = fmt.Fprintf(writer, "\n[%s]\naws_access_key_id = %s\naws_secret_access_key = %s\n", profileName, accessKeyInput, secretAccessKeyInput)
+				if err != nil {
+					panic("This is not good either")
+				}
+				writer.Flush()
+
+				app.SetRoot(grid, true).EnableMouse(false).Run()
+				switch currentFocus {
+				case "buckets":
+					app.SetFocus(buckets)
+				case "preview":
+					app.SetFocus(preview)
+				default:
+					app.SetFocus(files)
+				}
+			}).
+				AddButton("Cancel", func() {
+					switch currentFocus {
+					case "buckets":
+						app.SetRoot(grid, true).SetFocus(buckets).EnableMouse(false).Run()
+					case "preview":
+						app.SetRoot(grid, true).SetFocus(preview).EnableMouse(false).Run()
+					default:
+						app.SetRoot(grid, true).SetFocus(files).EnableMouse(false).Run()
+					}
 				})
+				// TODO: use app.GetFocus() to handle exit events a lot better
+
 			form.SetBorder(true).SetTitle("AWS Credentials Configuration").SetTitleAlign(tview.AlignLeft)
-			app.SetRoot(form, true).EnableMouse(true).Run()
+			app.SetRoot(form, true).EnableMouse(false).Run()
 
 		case tcell.KeyEscape | tcell.KeyCtrlQ:
 			modal := tview.NewModal().
@@ -400,10 +540,26 @@ func main() {
 						os.Exit(0)
 					}
 					if buttonLabel == "Cancel" {
-						app.SetRoot(grid, true).EnableMouse(true).Run()
+						switch currentFocus {
+						case "buckets":
+							app.SetRoot(grid, true).SetFocus(buckets).EnableMouse(false).Run()
+						case "preview":
+							app.SetRoot(grid, true).SetFocus(preview).EnableMouse(false).Run()
+						default:
+							app.SetRoot(grid, true).SetFocus(files).EnableMouse(false).Run()
+						}
 					}
 				})
-			app.SetRoot(modal, true).EnableMouse(true).Run()
+			app.SetRoot(modal, true).EnableMouse(false).Run()
+
+		case tcell.KeyCtrlU:
+			var mu sync.Mutex
+			mu.Lock()
+			defer mu.Unlock()
+			spinTitle(app, files, "Uploading... ", func() {
+				// something long running
+				time.Sleep(10 * time.Second)
+			})
 
 		}
 		return event
