@@ -3,8 +3,10 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
 	"flag"
 	"fmt"
+	"math/big"
 	"os"
 	"strings"
 	"sync"
@@ -66,6 +68,22 @@ func spinTitle(app *tview.Application, box *tview.List, title string, action fun
 			}
 		}
 	}()
+}
+
+const (
+	chars = "0123456789abcdefghijklmnopqrstuvwxyz"
+)
+
+func generateRandomString(length int) (string, error) {
+	var result string
+	for i := 0; i < length; i++ {
+		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
+		if err != nil {
+			return "", err
+		}
+		result += string(chars[num.Int64()])
+	}
+	return result, nil
 }
 
 func usage() {
@@ -530,6 +548,89 @@ func main() {
 			form.SetBorder(true).SetTitle("AWS Credentials Configuration").SetTitleAlign(tview.AlignLeft)
 			app.SetRoot(form, true).EnableMouse(false).Run()
 
+		case tcell.KeyCtrlO:
+			bucketInput := tview.NewInputField().
+				SetLabel(fmt.Sprintf("Enter bucket name: ")).
+				SetFieldWidth(54)
+
+			grid := tview.NewGrid().
+				SetRows(1, 0, 1).
+				SetColumns(50, 50, 0).
+				SetBorders(false).
+				AddItem(tview.NewTextView().
+					SetTextAlign(tview.AlignLeft).
+					SetDynamicColors(true).
+					SetText(""), 0, 0, 1, 3, 0, 0, false).
+				AddItem(bucketInput, 2, 0, 1, 3, 0, 0, false)
+
+			// Add items to the grid
+			grid.AddItem(buckets, 1, 0, 1, 1, 0, 100, false).
+				AddItem(files, 1, 1, 1, 1, 0, 100, false).
+				AddItem(preview, 1, 2, 1, 1, 0, 100, false)
+
+			app.SetRoot(grid, true).SetFocus(bucketInput)
+
+			bucketInput.SetDoneFunc(func(key tcell.Key) {
+				if key == tcell.KeyEnter {
+					input := &s3.CreateBucketInput{
+						Bucket: aws.String(bucketInput.GetText()),
+					}
+
+					_, err := svc.CreateBucket(input)
+					if err != nil {
+						// s3 buckets can only have 63 chars
+						nameLen := len(bucketInput.GetText())
+						// this is technically redundent now as field length is capped at 54
+						if nameLen+8 <= 63 {
+							hash, err := generateRandomString(8)
+							if err != nil {
+								panic(err)
+							}
+							uniqueBucketName := bucketInput.GetText() + "-" + hash
+							input2 := &s3.CreateBucketInput{
+								Bucket: aws.String(uniqueBucketName),
+							}
+							_, err = svc.CreateBucket(input2)
+							if err != nil {
+								fmt.Println(input2)
+								panic(err)
+							}
+						}
+						return
+					}
+					res, err := svc.ListBuckets(&s3.ListBucketsInput{})
+					if err != nil {
+						panic(err)
+					}
+
+					buckets.Clear()
+					for _, val := range res.Buckets {
+						buckets.AddItem(*val.Name, "", 0, nil)
+					}
+
+					buckets.SetBorder(true).SetTitle("Buckets <Ctrl+b>")
+
+					grid := tview.NewGrid().
+						SetRows(1, 0, 1).
+						SetColumns(50, 50, 0).
+						SetBorders(false).
+						AddItem(tview.NewTextView().
+							SetTextAlign(tview.AlignLeft).
+							SetDynamicColors(true).
+							SetText(""), 0, 0, 1, 3, 0, 0, false).
+						AddItem(tview.NewTextView().
+							SetTextAlign(tview.AlignLeft).
+							SetDynamicColors(true).SetText(fmt.Sprintf("Credentials: [yellow]%s[white] - Shortcuts: ([green]/[white])search | ([green]ESC[white])ape | <[green]Ctrl+[white]> ([green]c[white])reate bucket | ([green]a[white])dd Credentials | ([green]d[white])elete | ([green]r[white])ename | ([green]u[white])pload | ([green]s[white])wap credentials", envName)), 2, 0, 1, 3, 0, 0, false)
+
+					// Add items to the grid
+					grid.AddItem(buckets, 1, 0, 1, 1, 0, 100, false).
+						AddItem(files, 1, 1, 1, 1, 0, 100, false).
+						AddItem(preview, 1, 2, 1, 1, 0, 100, false)
+
+					app.SetRoot(grid, true).SetFocus(files)
+				}
+			})
+
 		case tcell.KeyEscape | tcell.KeyCtrlQ:
 			modal := tview.NewModal().
 				SetText("Do you want to quit s3-tui?").
@@ -557,7 +658,7 @@ func main() {
 			mu.Lock()
 			defer mu.Unlock()
 			spinTitle(app, files, "Uploading... ", func() {
-				// something long running
+				// swap this with s3 upload
 				time.Sleep(10 * time.Second)
 			})
 
