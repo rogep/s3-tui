@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -8,6 +9,9 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -101,10 +105,59 @@ func usage() {
 	fmt.Println("  arg3        AWS SSO (Optional)")
 }
 
+// TODO: have all functions return (type, error)
+func getAWSCredentialProfiles() []awsCreds {
+	awsCredentialsFile := os.Getenv("HOME") + "/.aws/credentials"
+	file, err := os.Open(awsCredentialsFile)
+	if err != nil {
+		fmt.Println("Error opening AWS credentials file:", err)
+		panic(err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+
+	var credStruct awsCreds
+	var profiles []awsCreds
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			profile := strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
+			credStruct = awsCreds{}
+			credStruct.name = profile
+		} else if strings.HasPrefix(line, "aws_access_key_id") {
+			credStruct.accessKey = strings.Split(line, " ")[2]
+		} else if strings.HasPrefix(line, "aws_secret_access_key") {
+			credStruct.secretAccessKey = strings.Split(line, " ")[2]
+		} else if strings.HasPrefix(line, "sso") {
+			credStruct.sso = strings.Split(line, " ")[2]
+		} else if line == "\n" || line == "" {
+			if credStruct != (awsCreds{}) {
+				profiles = append(profiles, credStruct)
+				credStruct = awsCreds{}
+			}
+		}
+	}
+	// handle EOF case
+	if credStruct != (awsCreds{}) {
+		profiles = append(profiles, credStruct)
+	}
+
+	if err := scanner.Err(); err != nil {
+		fmt.Println("Error reading AWS credentials file:", err)
+		panic(err)
+	}
+	return profiles
+}
+
 func main() {
 	// TODO: Consider using some CLI for creds before we do a pop up
 	// with no flags set, the application will look at the default profile
 	envPtr := flag.Bool("E", false, "Use AWS credentials from environment variables")
+	credPtr := flag.Bool("c", false, "Use ephemeral AWS credentials from positional arguments")
+	profilePtr := flag.String("p", "default", "Credential profile to select from .aws/credentials. Defaults to \"Default\", or the first found, if no flags are provided.")
 	flag.Usage = usage
 	flag.Parse()
 	fmt.Println(os.Environ())
@@ -382,7 +435,7 @@ func main() {
 		selectedKey := mainText
 		output, err := s3Client.GetObject(context.TODO(), &s3.GetObjectInput{
 			Bucket: aws.String(bucketName),
-			Key:    aws.String(selectedBucket),
+			Key:    aws.String(selectedKey),
 			Range:  aws.String("bytes=0-1000"),
 		})
 		if err != nil {

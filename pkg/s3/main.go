@@ -7,7 +7,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
-	"github.com/rogep/s3-tui/s3handler"
+	"github.com/rogep/s3-tui/pkg/s3handler"
 )
 
 // type s3Handler struct {
@@ -83,8 +83,8 @@ func main() {
 	client := s3.NewFromConfig(cfg)
 	s := s3handler.NewS3Handler(*client)
 	// NB: you must have a / at the end of your prefix otherwise it will only return your prefix as a folder. Not what we want!!
-	folders, _ := s.getFolderNames("consilium-ml-projects-efs-backups", "/", "boart-longyear-downhole-ml/Final_PLSR_Models/")
-	keys, _ := s.getKeyNames("consilium-ml-projects-efs-backups", "/", "boart-longyear-downhole-ml/Final_PLSR_Models/")
+	folders, _ := s.GetFolderNames("consilium-ml-projects-efs-backups", "/", "boart-longyear-downhole-ml/Final_PLSR_Models/")
+	keys, _ := s.GetKeyNames("consilium-ml-projects-efs-backups", "/", "boart-longyear-downhole-ml/Final_PLSR_Models/")
 	combined := append(folders, keys...)
 	fmt.Println(combined)
 }

@@ -8,17 +8,17 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-type s3Handler struct {
+type S3Handler struct {
 	s3Client *s3.Client
 }
 
-func NewS3Handler(client s3.Client) *s3Handler {
-	return &s3Handler{
+func NewS3Handler(client s3.Client) *S3Handler {
+	return &S3Handler{
 		s3Client: &client,
 	}
 }
 
-func (s *s3Handler) getFolderNames(b string, d string, p string) ([]string, error) {
+func (s *S3Handler) GetFolderNames(b string, d string, p string) ([]string, error) {
 	params := &s3.ListObjectsV2Input{
 		Bucket:    aws.String(b),
 		Delimiter: aws.String(d),
@@ -46,7 +46,7 @@ func (s *s3Handler) getFolderNames(b string, d string, p string) ([]string, erro
 	return folders, nil
 }
 
-func (s *s3Handler) getKeyNames(b string, d string, p string) ([]string, error) {
+func (s *S3Handler) GetKeyNames(b string, d string, p string) ([]string, error) {
 	params := &s3.ListObjectsV2Input{
 		Bucket:    aws.String(b),
 		Delimiter: aws.String(d),
