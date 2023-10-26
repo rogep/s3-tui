@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"flag"
@@ -20,6 +19,9 @@ import (
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+
+	"github.com/rogep/s3-tui/pkg/awslib"
+	"github.com/rogep/s3-tui/pkg/utils"
 )
 
 var (
@@ -94,17 +96,6 @@ func generateRandomString(length int) (string, error) {
 	return result, nil
 }
 
-func usage() {
-	fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s:\n", os.Args[0])
-	flag.PrintDefaults()
-
-	// Add descriptions for positional arguments
-	fmt.Println("\nPositional Arguments:")
-	fmt.Println("  arg1        AWS Access Key ID")
-	fmt.Println("  arg2        AWS Secret Access Key")
-	fmt.Println("  arg3        AWS SSO (Optional)")
-}
-
 // TODO: have all functions return (type, error)
 func getAWSCredentialProfiles() []awsCreds {
 	awsCredentialsFile := os.Getenv("HOME") + "/.aws/credentials"
@@ -153,14 +144,7 @@ func getAWSCredentialProfiles() []awsCreds {
 }
 
 func main() {
-	// TODO: Consider using some CLI for creds before we do a pop up
-	// with no flags set, the application will look at the default profile
-	envPtr := flag.Bool("E", false, "Use AWS credentials from environment variables")
-	credPtr := flag.Bool("c", false, "Use ephemeral AWS credentials from positional arguments")
-	profilePtr := flag.String("p", "default", "Credential profile to select from .aws/credentials. Defaults to \"Default\", or the first found, if no flags are provided.")
-	flag.Usage = usage
-	flag.Parse()
-	fmt.Println(os.Environ())
+	envPtr, credPtr, profilePtr := utils.ParseFlags()
 
 	var cfg aws.Config
 
@@ -221,18 +205,16 @@ func main() {
 	}
 
 	s3Client := s3.NewFromConfig(cfg)
-	input := &s3.ListBucketsInput{}
+	s := awslib.NewS3Handler(*s3Client)
 
-	res, err := s3Client.ListBuckets(context.TODO(), input)
+	res, err := s.GetBuckets()
 	if err != nil {
 		panic(err)
 	}
-
 	app = tview.NewApplication()
-
 	buckets := tview.NewList().ShowSecondaryText(false)
-	for _, val := range res.Buckets {
-		buckets.AddItem(*val.Name, "", 0, nil)
+	for _, val := range res {
+		buckets.AddItem(val, "", 0, nil)
 	}
 
 	// SetBackgroundColor(tcell.ColorDefault)
@@ -250,31 +232,31 @@ func main() {
 			app.SetFocus(buckets)
 		})
 	files.SetBorder(true).SetTitle("Files <Ctrl+f>").SetBorderColor(tcell.ColorWhite)
+
+	// LIST ACTIONS
 	buckets.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
 		selectedBucket := mainText
 		bucketName = selectedBucket
 
-		input2 := &s3.ListObjectsV2Input{
-			Bucket:  aws.String(selectedBucket),
-			MaxKeys: int32(1000),
-		}
-
-		result, err := s3Client.ListObjectsV2(context.TODO(), input2)
+		result, err := s.GetDirectoryStructure(bucketName, "/", "")
 		if err != nil {
 			panic(err)
 		}
+
 		files.Clear()
 		preview.Clear()
 		app.SetFocus(files)
 		files.SetBorderColor(tcell.ColorYellow)
 		buckets.SetBorderColor(tcell.ColorWhite)
-		for _, val := range result.Contents {
-			if val.Size == 0 {
+
+		for _, val := range result {
+			if val == "" {
 				continue
 			}
-			files.AddItem(*val.Key, "", 0, nil)
+			files.AddItem(val, "", 0, nil)
 		}
 	})
+
 	files.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		selectedItemIndex := files.GetCurrentItem()
 		selectedKey, _ := files.GetItemText(selectedItemIndex)
@@ -432,21 +414,49 @@ func main() {
 		return event
 	})
 	files.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
+		// TODO: handle ".." traversal backwards
 		selectedKey := mainText
-		output, err := s3Client.GetObject(context.TODO(), &s3.GetObjectInput{
-			Bucket: aws.String(bucketName),
-			Key:    aws.String(selectedKey),
-			Range:  aws.String("bytes=0-1000"),
-		})
-		if err != nil {
-			fmt.Println("Error getting object ", err)
+		if selectedKey != ".." {
+			selectedFile = selectedKey
+		} else {
+			splitKey := strings.Split(selectedFile, "/")
+			if len(splitKey) > 2 {
+				splitKey = splitKey[:len(splitKey)-1]
+				fmt.Println(splitKey)
+				selectedKey = strings.Join(splitKey, "/") + "/"
+			} else {
+				selectedKey = ""
+			}
+			selectedFile = selectedKey
 		}
 
-		// Convert the content to byte slice
-		buf := new(bytes.Buffer)
-		buf.ReadFrom(output.Body)
-		byteContent := buf.Bytes()
-		preview.SetText(string(byteContent))
+		if selectedKey == "" {
+			files.Clear()
+			res, err := s.GetDirectoryStructure(bucketName, "/", selectedKey)
+			if err != nil {
+				panic(err)
+			}
+			for _, val := range res {
+				files.AddItem(val, "", 0, nil)
+			}
+		} else if selectedKey[len(selectedKey)-1:] == "/" {
+			files.Clear()
+			res, err := s.GetDirectoryStructure(bucketName, "/", selectedKey)
+			if err != nil {
+				panic(err)
+			}
+			for _, val := range res {
+				files.AddItem(val, "", 0, nil)
+			}
+
+		} else {
+			byteContent, err := s.PreviewFile(bucketName, selectedKey)
+			if err != nil {
+				// TODO: fix error handling
+				panic(err)
+			}
+			preview.SetText(string(byteContent))
+		}
 	})
 
 	// TODO: figure out how to create a helper footer
