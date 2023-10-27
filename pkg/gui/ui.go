@@ -421,8 +421,7 @@ func main() {
 		} else {
 			splitKey := strings.Split(selectedFile, "/")
 			if len(splitKey) > 2 {
-				splitKey = splitKey[:len(splitKey)-1]
-				fmt.Println(splitKey)
+				splitKey = splitKey[:len(splitKey)-2]
 				selectedKey = strings.Join(splitKey, "/") + "/"
 			} else {
 				selectedKey = ""
@@ -455,6 +454,7 @@ func main() {
 				// TODO: fix error handling
 				panic(err)
 			}
+			byteContent = utils.ParsePreview(byteContent)
 			preview.SetText(string(byteContent))
 		}
 	})
@@ -474,7 +474,7 @@ func main() {
 		SetColumns(50, 50, 0).
 		SetBorders(false).
 		AddItem(newPrimitive(""), 0, 0, 1, 3, 0, 0, false).
-		AddItem(newPrimitive(fmt.Sprintf("Environment: [yellow]%s[white] - Shortcuts: ([green]/[white])search | <[green]Ctrl+[white]> ([green]q[white])uit | ([green]h[white])elp | ([green]e[white])nvironments | ([green]a[white])dd Environment | ([green]d[white])elete | ([green]r[white])ename | ([green]u[white])pload", envName)), 2, 0, 1, 3, 0, 0, false)
+		AddItem(newPrimitive(fmt.Sprintf("Credentials: [yellow]%s[white] - Shortcuts: ([green]/[white])search | ([green]ESC[white])ape | <[green]Ctrl+[white]> ([green]c[white])reate bucket | ([green]a[white])dd Credentials | ([green]d[white])elete | ([green]r[white])ename | ([green]u[white])pload | ([green]s[white])wap credentials", envName)), 2, 0, 1, 3, 0, 0, false)
 
 	// // Layout for screens narrower than 100 cells (menu and side bar are hidden).
 	// grid.AddItem(buckets, 0, 0, 0, 0, 0, 0, false).
@@ -545,35 +545,10 @@ func main() {
 			bucketInput.SetDoneFunc(func(key tcell.Key) {
 				if key == tcell.KeyEnter {
 					spinTitle(app, buckets, "Creating bucket", func() {
-						input := &s3.CreateBucketInput{
-							Bucket: aws.String(bucketInput.GetText()),
-						}
-
-						_, err := s3Client.CreateBucket(context.TODO(), input)
+						_, err := s.CreateBucket(bucketInput.GetText(), 8)
 						if err != nil {
 							panic("lame")
 						}
-						// if err != nil {
-						// 	// s3 buckets can only have 63 chars
-						// 	nameLen := len(bucketInput.GetText())
-						// 	// this is technically redundent now as field length is capped at 54
-						// 	if nameLen+8 <= 63 {
-						// 		hash, err := generateRandomString(8)
-						// 		if err != nil {
-						// 			panic(err)
-						// 		}
-						// 		uniqueBucketName := bucketInput.GetText() + "-" + hash
-						// 		input2 := &s3.CreateBucketInput{
-						// 			Bucket: aws.String(uniqueBucketName),
-						// 		}
-						// 		_, err = svc.CreateBucket(input2)
-						// 		if err != nil {
-						// 			fmt.Println(input2)
-						// 			panic(err)
-						// 		}
-						// 	}
-						// 	return
-						// }
 					})
 					res, err := s3Client.ListBuckets(context.TODO(), &s3.ListBucketsInput{})
 					if err != nil {
