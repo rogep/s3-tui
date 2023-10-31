@@ -152,3 +152,22 @@ func (s *S3Handler) PreviewFile(bucket string, key string) ([]byte, error) {
 	byteContent := buf.Bytes()
 	return byteContent, nil
 }
+
+func (s *S3Handler) IsGlacier(bucket string, key string) (bool, error) {
+	// TODO: add logic here
+	input := &s3.HeadObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	}
+	res, err := s.s3Client.HeadObject(context.TODO(), input)
+	if err != nil {
+		// i dunno what to return here
+		return false, err
+	}
+
+	if res.StorageClass == "GLACIER" {
+		return true, nil
+	} else {
+		return false, nil
+	}
+}

@@ -1,42 +1,86 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"crypto/rand"
 	"flag"
 	"fmt"
-	"math/big"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+	"github.com/sahilm/fuzzy"
 
 	"github.com/rogep/s3-tui/pkg/awslib"
 	"github.com/rogep/s3-tui/pkg/utils"
 )
 
 var (
-	app          *tview.Application
-	bucketName   string
-	envName      string
-	currentFocus string // allows refocusing when exiting forms/new app state
-	selectedFile string
+	app            *tview.Application
+	bucketName     string
+	envName        string
+	currentFocus   string // allows refocusing when exiting forms/new app state
+	selectedFile   string
+	initialBuckets []string // used for fuzzy finding as we clear the bucket list and lose state
+	targetIndex    int
 )
 
-type awsCreds struct {
-	name            string
-	accessKey       string
-	secretAccessKey string
-	sso             string
+func CreateGridWithSearch(buckets *tview.List, files *tview.List, preview *tview.TextView, footer *tview.InputField) *tview.Grid {
+	grid := tview.NewGrid().
+		SetRows(1, 0, 1).
+		SetColumns(50, 50, 0).
+		SetBorders(false).
+		AddItem(tview.NewTextView().
+			SetTextAlign(tview.AlignLeft).
+			SetDynamicColors(true).
+			SetText(""), 0, 0, 1, 3, 0, 0, false).
+		AddItem(footer, 2, 0, 1, 3, 0, 0, false)
+
+	grid.AddItem(buckets, 1, 0, 1, 1, 0, 100, false).
+		AddItem(files, 1, 1, 1, 1, 0, 100, false).
+		AddItem(preview, 1, 2, 1, 1, 0, 100, false)
+
+	return grid
+}
+
+func CreateDefaultGrid(buckets *tview.List, files *tview.List, preview *tview.TextView, footer *tview.TextView) *tview.Grid {
+	grid := tview.NewGrid().
+		SetRows(1, 0, 1).
+		SetColumns(50, 50, 0).
+		SetBorders(false).
+		AddItem(tview.NewTextView().
+			SetTextAlign(tview.AlignLeft).
+			SetDynamicColors(true).
+			SetText(""), 0, 0, 1, 3, 0, 0, false).
+		AddItem(footer, 2, 0, 1, 3, 0, 0, false)
+
+	grid.AddItem(buckets, 1, 0, 1, 1, 0, 100, false).
+		AddItem(files, 1, 1, 1, 1, 0, 100, false).
+		AddItem(preview, 1, 2, 1, 1, 0, 100, false)
+
+	return grid
+}
+
+func createDefaultFooter(envName string) *tview.TextView {
+	parts := []string{
+		"Credentials: [yellow]%s[white] - Shortcuts: ([green]/[white])search |",
+		" ([green]ESC[white])ape | <[green]Ctrl+[white]> ([green]c[white])reate bucket |",
+		" ([green]a[white])dd Credentials | ([green]d[white])elete | ([green]r[white])ename |",
+		" ([green]u[white])pload | ([green]s[white])wap credentials",
+	}
+
+	footerText := strings.Join(parts, "\n")
+	footerText = fmt.Sprintf(footerText, envName)
+
+	return tview.NewTextView().
+		SetTextAlign(tview.AlignLeft).
+		SetDynamicColors(true).
+		SetText(footerText)
 }
 
 func spinTitle(app *tview.Application, box *tview.List, title string, action func()) {
@@ -80,130 +124,12 @@ func spinTitle(app *tview.Application, box *tview.List, title string, action fun
 	}()
 }
 
-const (
-	chars = "0123456789abcdefghijklmnopqrstuvwxyz"
-)
-
-func generateRandomString(length int) (string, error) {
-	var result string
-	for i := 0; i < length; i++ {
-		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
-		if err != nil {
-			return "", err
-		}
-		result += string(chars[num.Int64()])
-	}
-	return result, nil
-}
-
-// TODO: have all functions return (type, error)
-func getAWSCredentialProfiles() []awsCreds {
-	awsCredentialsFile := os.Getenv("HOME") + "/.aws/credentials"
-	file, err := os.Open(awsCredentialsFile)
-	if err != nil {
-		fmt.Println("Error opening AWS credentials file:", err)
-		panic(err)
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-
-	var credStruct awsCreds
-	var profiles []awsCreds
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			profile := strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
-			credStruct = awsCreds{}
-			credStruct.name = profile
-		} else if strings.HasPrefix(line, "aws_access_key_id") {
-			credStruct.accessKey = strings.Split(line, " ")[2]
-		} else if strings.HasPrefix(line, "aws_secret_access_key") {
-			credStruct.secretAccessKey = strings.Split(line, " ")[2]
-		} else if strings.HasPrefix(line, "sso") {
-			credStruct.sso = strings.Split(line, " ")[2]
-		} else if line == "\n" || line == "" {
-			if credStruct != (awsCreds{}) {
-				profiles = append(profiles, credStruct)
-				credStruct = awsCreds{}
-			}
-		}
-	}
-	// handle EOF case
-	if credStruct != (awsCreds{}) {
-		profiles = append(profiles, credStruct)
-	}
-
-	if err := scanner.Err(); err != nil {
-		fmt.Println("Error reading AWS credentials file:", err)
-		panic(err)
-	}
-	return profiles
-}
-
 func main() {
 	envPtr, credPtr, profilePtr := utils.ParseFlags()
 
 	var cfg aws.Config
 
-	if (len(flag.Args()) > 3 || len(flag.Args()) == 1) && *envPtr {
-		fmt.Println("Positional arguments can only be AWS Access key, secret access key and SSO and require the -E flag")
-		flag.Usage()
-		os.Exit(1)
-	} else if len(flag.Args()) > 1 && !*envPtr {
-		fmt.Println("Positional arguments can only be AWS Access key, secret access key and SSO and require the -E flag")
-		flag.Usage()
-		os.Exit(1)
-	} else if len(flag.Args()) == 2 && *credPtr {
-		cfg, _ = config.LoadDefaultConfig(context.TODO(),
-			config.WithRegion("ap-southeast-2"),
-			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(flag.Args()[0], flag.Args()[1], "")),
-		)
-		envName = "cli"
-	} else if len(flag.Args()) == 3 && *credPtr {
-		cfg, _ = config.LoadDefaultConfig(context.TODO(),
-			config.WithRegion("ap-southeast-2"),
-			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(flag.Args()[0], flag.Args()[1], flag.Args()[2])),
-		)
-		envName = "cli"
-	} else if *envPtr {
-		// TODO: remove SSO support -- i dont even use it when i use s3
-		awsAccessKey := os.Getenv("AWS_ACCESS_KEY_ID")
-		awsSecretAccessKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
-		awsSSOKey := os.Getenv("AWS_SSO_SOMETHING")
-		cfg, _ = config.LoadDefaultConfig(context.TODO(),
-			config.WithRegion("ap-southeast-2"),
-			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(awsAccessKey, awsSecretAccessKey, awsSSOKey)))
-		envName = "Environment Variables"
-	} else if *profilePtr != "" {
-		creds := getAWSCredentialProfiles()
-		found := false
-		var profileNames []string
-		for _, cred := range creds {
-			profileNames = append(profileNames, cred.name)
-			if cred.name == *profilePtr {
-				cfg, _ = config.LoadDefaultConfig(context.TODO(),
-					config.WithRegion("ap-southeast-2"),
-					config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(cred.accessKey, cred.secretAccessKey, cred.sso)))
-				envName = cred.name
-
-				found = true
-				break
-			}
-			if !found {
-				panic(fmt.Sprintf("Profile: %s not a valid profile. Found: %s", *profilePtr, profileNames))
-			}
-		}
-	} else {
-		creds := getAWSCredentialProfiles()
-		cfg, _ = config.LoadDefaultConfig(context.TODO(),
-			config.WithRegion("ap-southeast-2"),
-			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(creds[0].accessKey, creds[0].secretAccessKey, creds[0].sso)))
-		envName = creds[0].name
-	}
-
+	cfg, envName := awslib.InitCredentials(flag.CommandLine, envPtr, credPtr, profilePtr)
 	s3Client := s3.NewFromConfig(cfg)
 	s := awslib.NewS3Handler(*s3Client)
 
@@ -215,6 +141,7 @@ func main() {
 	buckets := tview.NewList().ShowSecondaryText(false)
 	for _, val := range res {
 		buckets.AddItem(val, "", 0, nil)
+		initialBuckets = append(initialBuckets, val)
 	}
 
 	// SetBackgroundColor(tcell.ColorDefault)
@@ -262,6 +189,8 @@ func main() {
 		selectedKey, _ := files.GetItemText(selectedItemIndex)
 		switch event.Key() {
 		case tcell.KeyCtrlD:
+			// TODO: refactor into awslib
+			// also check that we are deleting a key and not a file
 			input := &s3.DeleteObjectInput{
 				Bucket: aws.String(bucketName),
 				Key:    aws.String(selectedKey),
@@ -389,23 +318,8 @@ func main() {
 						files.AddItem(*val.Key, "", 0, nil)
 					}
 
-					grid := tview.NewGrid().
-						SetRows(1, 0, 1).
-						SetColumns(50, 50, 0).
-						SetBorders(false).
-						AddItem(tview.NewTextView().
-							SetTextAlign(tview.AlignLeft).
-							SetDynamicColors(true).
-							SetText(""), 0, 0, 1, 3, 0, 0, false).
-						AddItem(tview.NewTextView().
-							SetTextAlign(tview.AlignLeft).
-							SetDynamicColors(true).SetText(fmt.Sprintf("Credentials: [yellow]%s[white] - Shortcuts: ([green]/[white])search | ([green]ESC[white])ape | <[green]Ctrl+[white]> ([green]c[white])reate bucket | ([green]a[white])dd Credentials | ([green]d[white])elete | ([green]r[white])ename | ([green]u[white])pload | ([green]s[white])wap credentials", envName)), 2, 0, 1, 3, 0, 0, false)
-
-					// Add items to the grid
-					grid.AddItem(buckets, 1, 0, 1, 1, 0, 100, false).
-						AddItem(files, 1, 1, 1, 1, 0, 100, false).
-						AddItem(preview, 1, 2, 1, 1, 0, 100, false)
-
+					footer := createDefaultFooter(envName)
+					grid := CreateDefaultGrid(buckets, files, preview, footer)
 					app.SetRoot(grid, true).SetFocus(files)
 				}
 			})
@@ -414,7 +328,6 @@ func main() {
 		return event
 	})
 	files.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
-		// TODO: handle ".." traversal backwards
 		selectedKey := mainText
 		if selectedKey != ".." {
 			selectedFile = selectedKey
@@ -449,18 +362,23 @@ func main() {
 			}
 
 		} else {
-			byteContent, err := s.PreviewFile(bucketName, selectedKey)
+			glacier, err := s.IsGlacier(bucketName, selectedKey)
 			if err != nil {
-				// TODO: fix error handling
 				panic(err)
 			}
-			byteContent = utils.ParsePreview(byteContent)
-			preview.SetText(string(byteContent))
+			if glacier {
+				preview.SetText(string("Cannot view a file stored in Glacier. Please restore the file if you wish to view."))
+			} else {
+				byteContent, err := s.PreviewFile(bucketName, selectedKey)
+				if err != nil {
+					// TODO: fix error handling
+					panic(err)
+				}
+				byteContent = utils.ParsePreview(byteContent)
+				preview.SetText(string(byteContent))
+			}
 		}
 	})
-
-	// TODO: figure out how to create a helper footer
-	// ALSO NEED an environment/creds selector!!
 
 	newPrimitive := func(text string) tview.Primitive {
 		return tview.NewTextView().
@@ -525,21 +443,7 @@ func main() {
 				SetLabel(fmt.Sprintf("Enter bucket name: ")).
 				SetFieldWidth(54)
 
-			grid := tview.NewGrid().
-				SetRows(1, 0, 1).
-				SetColumns(50, 50, 0).
-				SetBorders(false).
-				AddItem(tview.NewTextView().
-					SetTextAlign(tview.AlignLeft).
-					SetDynamicColors(true).
-					SetText(""), 0, 0, 1, 3, 0, 0, false).
-				AddItem(bucketInput, 2, 0, 1, 3, 0, 0, false)
-
-			// Add items to the grid
-			grid.AddItem(buckets, 1, 0, 1, 1, 0, 100, false).
-				AddItem(files, 1, 1, 1, 1, 0, 100, false).
-				AddItem(preview, 1, 2, 1, 1, 0, 100, false)
-
+			grid := CreateGridWithSearch(buckets, files, preview, bucketInput)
 			app.SetRoot(grid, true).SetFocus(bucketInput)
 
 			bucketInput.SetDoneFunc(func(key tcell.Key) {
@@ -561,28 +465,107 @@ func main() {
 						buckets.AddItem(*val.Name, "", 0, nil)
 					}
 
-					grid := tview.NewGrid().
-						SetRows(1, 0, 1).
-						SetColumns(50, 50, 0).
-						SetBorders(false).
-						AddItem(tview.NewTextView().
-							SetTextAlign(tview.AlignLeft).
-							SetDynamicColors(true).
-							SetText(""), 0, 0, 1, 3, 0, 0, false).
-						AddItem(tview.NewTextView().
-							SetTextAlign(tview.AlignLeft).
-							SetDynamicColors(true).SetText(fmt.Sprintf("Credentials: [yellow]%s[white] - Shortcuts: ([green]/[white])search | ([green]ESC[white])ape | <[green]Ctrl+[white]> ([green]c[white])reate bucket | ([green]a[white])dd Credentials | ([green]d[white])elete | ([green]r[white])ename | ([green]u[white])pload | ([green]s[white])wap credentials", envName)), 2, 0, 1, 3, 0, 0, false)
-
-					// Add items to the grid
-					grid.AddItem(buckets, 1, 0, 1, 1, 0, 100, false).
-						AddItem(files, 1, 1, 1, 1, 0, 100, false).
-						AddItem(preview, 1, 2, 1, 1, 0, 100, false)
-
+					footer := createDefaultFooter(envName)
+					grid := CreateDefaultGrid(buckets, files, preview, footer)
 					app.SetRoot(grid, true).SetFocus(buckets)
 				}
 			})
 
-		case tcell.KeyEscape | tcell.KeyCtrlQ:
+			// nested switch is needed to use '/' (or skill issue). LETS GOOOOOOOOOOO
+		case tcell.KeyRune:
+			switch event.Rune() {
+			case '/':
+				renameInput := tview.NewInputField().
+					SetLabel("Search: ").
+					SetFieldWidth(100)
+
+				grid := CreateGridWithSearch(buckets, files, preview, renameInput)
+
+				app.SetRoot(grid, true).SetFocus(renameInput)
+				renameInput.SetChangedFunc(func(text string) {
+					results := fuzzy.Find(text, initialBuckets)
+					buckets.Clear()
+					for _, val := range results {
+						buckets.AddItem(val.Str, "", 0, nil)
+					}
+				})
+				renameInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+					if event.Key() == tcell.KeyBackspace || event.Key() == tcell.KeyBackspace2 {
+						text := renameInput.GetText()
+						if len(text) < 2 {
+							buckets.Clear()
+							for _, val := range initialBuckets {
+								buckets.AddItem(val, "", 0, nil)
+							}
+						} else {
+							results := fuzzy.Find(text, initialBuckets)
+							buckets.Clear()
+							for _, val := range results {
+								buckets.AddItem(val.Str, "", 0, nil)
+							}
+						}
+					} else if event.Key() == tcell.KeyDown {
+						count := buckets.GetItemCount()
+						index := buckets.GetCurrentItem()
+						index += 1
+						buckets.SetCurrentItem(index % count)
+					} else if event.Key() == tcell.KeyUp {
+						count := buckets.GetItemCount()
+						index := buckets.GetCurrentItem()
+						index -= 1
+						buckets.SetCurrentItem(index % count)
+					} else if event.Key() == tcell.KeyEnter {
+						if buckets.GetItemCount() == 0 {
+							for _, val := range initialBuckets {
+								buckets.AddItem(val, "", 0, nil)
+							}
+							footer := createDefaultFooter(envName)
+							grid := CreateDefaultGrid(buckets, files, preview, footer)
+							app.SetRoot(grid, true).SetFocus(buckets)
+							return event
+						}
+						text, _ := buckets.GetItemText(buckets.GetCurrentItem())
+						buckets.Clear()
+						for _, val := range initialBuckets {
+							buckets.AddItem(val, "", 0, nil)
+						}
+						targetIndex = -1
+						for i := 0; i < buckets.GetItemCount(); i++ {
+							mainText, _ := buckets.GetItemText(i)
+							if mainText == text {
+								targetIndex = i
+								buckets.SetCurrentItem(targetIndex)
+								break
+							}
+						}
+
+						footer := createDefaultFooter(envName)
+						grid := CreateDefaultGrid(buckets, files, preview, footer)
+
+						app.SetRoot(grid, true).SetFocus(buckets)
+
+						if targetIndex != -1 {
+							buckets.SetCurrentItem(targetIndex)
+							app.QueueEvent(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+						}
+					} else if event.Key() == tcell.KeyEscape {
+
+						buckets.Clear()
+						for _, val := range initialBuckets {
+							buckets.AddItem(val, "", 0, nil)
+						}
+
+						footer := createDefaultFooter(envName)
+						grid := CreateDefaultGrid(buckets, files, preview, footer)
+
+						app.SetRoot(grid, true).SetFocus(buckets)
+					}
+
+					return event
+				})
+			}
+
+		case tcell.KeyCtrlQ:
 			modal := tview.NewModal().
 				SetText("Do you want to quit s3-tui?").
 				AddButtons([]string{"Quit", "Cancel"}).
