@@ -1,17 +1,12 @@
-package main
+package gui
 
 import (
-	"context"
-	"flag"
 	"fmt"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 	"github.com/sahilm/fuzzy"
@@ -74,7 +69,7 @@ func createDefaultFooter(envName string) *tview.TextView {
 		" ([green]u[white])pload | ([green]s[white])wap credentials",
 	}
 
-	footerText := strings.Join(parts, "\n")
+	footerText := strings.Join(parts, "")
 	footerText = fmt.Sprintf(footerText, envName)
 
 	return tview.NewTextView().
@@ -124,15 +119,7 @@ func spinTitle(app *tview.Application, box *tview.List, title string, action fun
 	}()
 }
 
-func main() {
-	envPtr, credPtr, profilePtr := utils.ParseFlags()
-
-	var cfg aws.Config
-
-	cfg, envName := awslib.InitCredentials(flag.CommandLine, envPtr, credPtr, profilePtr)
-	s3Client := s3.NewFromConfig(cfg)
-	s := awslib.NewS3Handler(*s3Client)
-
+func S3Gui(s *awslib.S3Handler, envName string) {
 	res, err := s.GetBuckets()
 	if err != nil {
 		panic(err)
@@ -189,32 +176,19 @@ func main() {
 		selectedKey, _ := files.GetItemText(selectedItemIndex)
 		switch event.Key() {
 		case tcell.KeyCtrlD:
-			// TODO: refactor into awslib
-			// also check that we are deleting a key and not a file
-			input := &s3.DeleteObjectInput{
-				Bucket: aws.String(bucketName),
-				Key:    aws.String(selectedKey),
+			res, err := s.DeleteObject(bucketName, selectedKey)
+			if res == false {
+				return event
 			}
-			_, err := s3Client.DeleteObject(context.TODO(), input)
-			if err != nil {
-				if aerr, ok := err.(awserr.Error); ok {
-					switch aerr.Code() {
-					default:
-						fmt.Println(aerr.Error())
-					}
-				} else {
-					// Print the error, cast err to awserr.Error to get the Code and
-					// Message from an error.
-					fmt.Println(err.Error())
-				}
-			}
-			// need to refresh the bucket view
-			input2 := &s3.ListObjectsV2Input{
-				Bucket:  aws.String(bucketName),
-				MaxKeys: int32(1000),
+			var prefix string
+			splitKey := strings.Split(selectedKey, "/")
+			if len(splitKey) == 1 {
+				prefix = ""
+			} else {
+				prefix = strings.Join(splitKey[:len(splitKey)-1], "/") + "/"
 			}
 
-			result, err := s3Client.ListObjectsV2(context.TODO(), input2)
+			result, err := s.GetDirectoryStructure(bucketName, "/", prefix)
 			if err != nil {
 				panic(err)
 			}
@@ -223,99 +197,49 @@ func main() {
 			app.SetFocus(files)
 			files.SetBorderColor(tcell.ColorYellow)
 			buckets.SetBorderColor(tcell.ColorWhite)
-			for _, val := range result.Contents {
-				if val.Size == 0 {
-					continue
-				}
-				files.AddItem(*val.Key, "", 0, nil)
+			for _, val := range result {
+				files.AddItem(val, "", 0, nil)
 			}
+
 			// TODO: remove key in rename
 		case tcell.KeyCtrlR:
-			trimmedKey := strings.Split(selectedKey, "/")
+			if selectedKey == ".." || selectedKey[len(selectedKey)-1:] == "/" {
+				footer := createDefaultFooter(envName)
+				grid := CreateDefaultGrid(buckets, files, preview, footer)
+				app.SetRoot(grid, true).SetFocus(files)
+				return event
+			}
 			renameInput := tview.NewInputField().
-				SetLabel(fmt.Sprintf("Rename %s ", trimmedKey[len(trimmedKey)-1])).
+				SetLabel("Rename: ").
 				SetFieldWidth(100)
-
-			grid := tview.NewGrid().
-				SetRows(1, 0, 1).
-				SetColumns(50, 50, 0).
-				SetBorders(false).
-				AddItem(tview.NewTextView().
-					SetTextAlign(tview.AlignLeft).
-					SetDynamicColors(true).
-					SetText(""), 0, 0, 1, 3, 0, 0, false).
-				AddItem(renameInput, 2, 0, 1, 3, 0, 0, false)
-
-			// Add items to the grid
-			grid.AddItem(buckets, 1, 0, 1, 1, 0, 100, false).
-				AddItem(files, 1, 1, 1, 1, 0, 100, false).
-				AddItem(preview, 1, 2, 1, 1, 0, 100, false)
-
+			grid := CreateGridWithSearch(buckets, files, preview, renameInput)
 			app.SetRoot(grid, true).SetFocus(renameInput)
 
 			renameInput.SetDoneFunc(func(key tcell.Key) {
 				if key == tcell.KeyEnter {
-					// A rename is a copy + delete + refresh list
-					// COPY
-					sourceKey := "/" + bucketName + "/" + selectedKey
-					input := &s3.CopyObjectInput{
-						Bucket:     aws.String(bucketName),
-						CopySource: aws.String(sourceKey),
-						Key:        aws.String(renameInput.GetText()),
-					}
-
-					_, err := s3Client.CopyObject(context.TODO(), input)
-					if err != nil {
-						// if aerr, ok := err.(awserr.Error); ok {
-						// 	switch aerr.Code() {
-						// 	case s3.ErrCodeObjectNotInActiveTierError:
-						// 		fmt.Println(s3.ErrCodeObjectNotInActiveTierError, aerr.Error())
-						// 	default:
-						// 		fmt.Println(aerr.Error())
-						// 	}
-						// } else {
-						// 	fmt.Println(err.Error())
-						// }
-						return
-					}
-					// DELETE
-					deleteInput := &s3.DeleteObjectInput{
-						Bucket: aws.String(bucketName),
-						Key:    aws.String(selectedKey),
-					}
-
-					_, err = s3Client.DeleteObject(context.TODO(), deleteInput)
-					if err != nil {
-						if aerr, ok := err.(awserr.Error); ok {
-							switch aerr.Code() {
-							default:
-								fmt.Println(aerr.Error())
-							}
-						} else {
-							fmt.Println(err.Error())
-						}
-						return
-					}
-					// UPDATE Files view
-					input2 := &s3.ListObjectsV2Input{
-						Bucket:  aws.String(bucketName),
-						MaxKeys: int32(1000),
-					}
-
-					result, err := s3Client.ListObjectsV2(context.TODO(), input2)
+					_, err := s.RenameObject(bucketName, selectedKey, renameInput.GetText())
 					if err != nil {
 						panic(err)
 					}
+					var prefix string
+					splitKey := strings.Split(selectedKey, "/")
+					if len(splitKey) == 1 {
+						prefix = ""
+					} else {
+						prefix = strings.Join(splitKey[:len(splitKey)-1], "/") + "/"
+					}
+					result, err := s.GetDirectoryStructure(bucketName, "/", prefix)
+					if err != nil {
+						panic(err)
+					}
+
 					files.Clear()
 					preview.Clear()
 					app.SetFocus(files)
 					files.SetBorderColor(tcell.ColorYellow)
 					buckets.SetBorderColor(tcell.ColorWhite)
-					for _, val := range result.Contents {
-						if val.Size == 0 {
-							continue
-						}
-						files.AddItem(*val.Key, "", 0, nil)
+					for _, val := range result {
+						files.AddItem(val, "", 0, nil)
 					}
 
 					footer := createDefaultFooter(envName)
@@ -380,29 +304,14 @@ func main() {
 		}
 	})
 
-	newPrimitive := func(text string) tview.Primitive {
-		return tview.NewTextView().
-			SetTextAlign(tview.AlignLeft).
-			SetDynamicColors(true).
-			SetText(text)
-	}
-	// TODO: use this below to add the environment profile name that you are on
-	grid := tview.NewGrid().
-		SetRows(1, 0, 1).
-		SetColumns(50, 50, 0).
-		SetBorders(false).
-		AddItem(newPrimitive(""), 0, 0, 1, 3, 0, 0, false).
-		AddItem(newPrimitive(fmt.Sprintf("Credentials: [yellow]%s[white] - Shortcuts: ([green]/[white])search | ([green]ESC[white])ape | <[green]Ctrl+[white]> ([green]c[white])reate bucket | ([green]a[white])dd Credentials | ([green]d[white])elete | ([green]r[white])ename | ([green]u[white])pload | ([green]s[white])wap credentials", envName)), 2, 0, 1, 3, 0, 0, false)
+	footer := createDefaultFooter(envName)
+	grid := CreateDefaultGrid(buckets, files, preview, footer)
 
+	// TODO: figure out a nice way to do reactivity
 	// // Layout for screens narrower than 100 cells (menu and side bar are hidden).
 	// grid.AddItem(buckets, 0, 0, 0, 0, 0, 0, false).
 	// 	AddItem(files, 0, 0, 0, 0, 0, 0, false).
 	// 	AddItem(preview, 0, 0, 0, 0, 0, 0, false)
-
-	// Layout for screens wider than 100 cells.
-	grid.AddItem(buckets, 1, 0, 1, 1, 0, 100, false).
-		AddItem(files, 1, 1, 1, 1, 0, 100, false).
-		AddItem(preview, 1, 2, 1, 1, 0, 100, false)
 
 	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
@@ -454,15 +363,15 @@ func main() {
 							panic("lame")
 						}
 					})
-					res, err := s3Client.ListBuckets(context.TODO(), &s3.ListBucketsInput{})
+					res, err := s.GetBuckets()
 					if err != nil {
 						panic(err)
 					}
 
 					buckets.Clear()
 					buckets.SetTitle("Buckets <Ctrl+b")
-					for _, val := range res.Buckets {
-						buckets.AddItem(*val.Name, "", 0, nil)
+					for _, val := range res {
+						buckets.AddItem(val, "", 0, nil)
 					}
 
 					footer := createDefaultFooter(envName)

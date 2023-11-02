@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	_ "strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 
 	"github.com/rogep/s3-tui/pkg/utils"
 )
@@ -170,4 +172,60 @@ func (s *S3Handler) IsGlacier(bucket string, key string) (bool, error) {
 	} else {
 		return false, nil
 	}
+}
+
+func (s *S3Handler) DeleteObject(bucket string, key string) (bool, error) {
+	// don't want to be delecting the directory do we???
+	if key[len(key)-1:] == "/" || key == ".." {
+		return false, nil
+	}
+
+	input := &s3.DeleteObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	}
+	_, err := s.s3Client.DeleteObject(context.TODO(), input)
+	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok {
+			switch aerr.Code() {
+			default:
+				return false, aerr
+			}
+		} else {
+			return false, aerr
+		}
+	}
+	return true, nil
+}
+
+func (s *S3Handler) RenameObject(bucket string, oldKey string, newKey string) (bool, error) {
+	sourceKey := "/" + bucket + "/" + oldKey
+	if oldKey[len(oldKey)-1:] == "/" || oldKey == ".." {
+		return false, nil
+	}
+	input := &s3.CopyObjectInput{
+		Bucket:     aws.String(bucket),
+		CopySource: aws.String(sourceKey),
+		Key:        aws.String(newKey),
+	}
+
+	_, err := s.s3Client.CopyObject(context.TODO(), input)
+	if err != nil {
+		// if aerr, ok := err.(awserr.Error); ok {
+		// 	switch aerr.Code() {
+		// 	case s3.ErrCodeObjectNotInActiveTierError:
+		// 		fmt.Println(s3.ErrCodeObjectNotInActiveTierError, aerr.Error())
+		// 	default:
+		// 		fmt.Println(aerr.Error())
+		// 	}
+		// } else {
+		// 	fmt.Println(err.Error())
+		// }
+		return false, err
+	}
+	res, err := s.DeleteObject(bucket, oldKey)
+	if !res {
+		return false, err
+	}
+	return true, nil
 }
