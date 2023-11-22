@@ -414,15 +414,17 @@ func S3Gui(s *awslib.S3Handler, envName string) {
 							}
 						}
 					} else if event.Key() == tcell.KeyDown {
-						count := buckets.GetItemCount()
-						index := buckets.GetCurrentItem()
-						index += 1
-						buckets.SetCurrentItem(index % count)
+						ScrollDown(buckets)
+						// count := buckets.GetItemCount()
+						// index := buckets.GetCurrentItem()
+						// index += 1
+						// buckets.SetCurrentItem(index % count)
 					} else if event.Key() == tcell.KeyUp {
-						count := buckets.GetItemCount()
-						index := buckets.GetCurrentItem()
-						index -= 1
-						buckets.SetCurrentItem(index % count)
+						ScrollUp(buckets)
+						// count := buckets.GetItemCount()
+						// index := buckets.GetCurrentItem()
+						// index -= 1
+						// buckets.SetCurrentItem(index % count)
 					} else if event.Key() == tcell.KeyEnter {
 						if buckets.GetItemCount() == 0 {
 							for _, val := range initialBuckets {
