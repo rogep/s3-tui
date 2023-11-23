@@ -9,7 +9,6 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
-	"github.com/sahilm/fuzzy"
 
 	"github.com/rogep/s3-tui/pkg/awslib"
 	"github.com/rogep/s3-tui/pkg/utils"
@@ -22,6 +21,7 @@ var (
 	currentFocus   string // allows refocusing when exiting forms/new app state
 	selectedFile   string
 	initialBuckets []string // used for fuzzy finding as we clear the bucket list and lose state
+	initialFiles   []string // used for fuzzy finding as we clear the files list and lose state
 	targetIndex    int
 )
 
@@ -146,13 +146,16 @@ func S3Gui(s *awslib.S3Handler, envName string) {
 			app.SetFocus(buckets)
 		})
 	files.SetBorder(true).SetTitle("Files <Ctrl+f>").SetBorderColor(tcell.ColorWhite)
+	currentFocus = "buckets"
 
 	// LIST ACTIONS
 	buckets.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
+		currentFocus = "files"
 		selectedBucket := mainText
 		bucketName = selectedBucket
 
 		result, err := s.GetDirectoryStructure(bucketName, "/", "")
+		initialFiles = result
 		if err != nil {
 			panic(err)
 		}
@@ -172,6 +175,7 @@ func S3Gui(s *awslib.S3Handler, envName string) {
 	})
 
 	files.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		currentFocus = "files"
 		selectedItemIndex := files.GetCurrentItem()
 		selectedKey, _ := files.GetItemText(selectedItemIndex)
 		switch event.Key() {
@@ -189,6 +193,7 @@ func S3Gui(s *awslib.S3Handler, envName string) {
 			}
 
 			result, err := s.GetDirectoryStructure(bucketName, "/", prefix)
+			initialFiles = result
 			if err != nil {
 				panic(err)
 			}
@@ -229,6 +234,7 @@ func S3Gui(s *awslib.S3Handler, envName string) {
 						prefix = strings.Join(splitKey[:len(splitKey)-1], "/") + "/"
 					}
 					result, err := s.GetDirectoryStructure(bucketName, "/", prefix)
+					initialFiles = result
 					if err != nil {
 						panic(err)
 					}
@@ -252,6 +258,7 @@ func S3Gui(s *awslib.S3Handler, envName string) {
 		return event
 	})
 	files.SetSelectedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
+		currentFocus = "files"
 		selectedKey := mainText
 		if selectedKey != ".." {
 			selectedFile = selectedKey
@@ -269,6 +276,7 @@ func S3Gui(s *awslib.S3Handler, envName string) {
 		if selectedKey == "" {
 			files.Clear()
 			res, err := s.GetDirectoryStructure(bucketName, "/", selectedKey)
+			initialFiles = res
 			if err != nil {
 				panic(err)
 			}
@@ -278,6 +286,7 @@ func S3Gui(s *awslib.S3Handler, envName string) {
 		} else if selectedKey[len(selectedKey)-1:] == "/" {
 			files.Clear()
 			res, err := s.GetDirectoryStructure(bucketName, "/", selectedKey)
+			initialFiles = res
 			if err != nil {
 				panic(err)
 			}
@@ -320,11 +329,13 @@ func S3Gui(s *awslib.S3Handler, envName string) {
 			buckets.SetBorderColor(tcell.ColorYellow)
 			files.SetBorderColor(tcell.ColorWhite)
 			preview.SetBorderColor(tcell.ColorWhite)
+			currentFocus = "buckets"
 		case tcell.KeyCtrlF:
 			app.SetFocus(files)
 			files.SetBorderColor(tcell.ColorYellow)
 			buckets.SetBorderColor(tcell.ColorWhite)
 			preview.SetBorderColor(tcell.ColorWhite)
+			currentFocus = "files"
 		case tcell.KeyCtrlP:
 			app.SetFocus(preview)
 			preview.SetBorderColor(tcell.ColorYellow)
@@ -391,90 +402,13 @@ func S3Gui(s *awslib.S3Handler, envName string) {
 				grid := CreateGridWithSearch(buckets, files, preview, renameInput)
 
 				app.SetRoot(grid, true).SetFocus(renameInput)
-				renameInput.SetChangedFunc(func(text string) {
-					results := fuzzy.Find(text, initialBuckets)
-					buckets.Clear()
-					for _, val := range results {
-						buckets.AddItem(val.Str, "", 0, nil)
-					}
-				})
-				renameInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-					if event.Key() == tcell.KeyBackspace || event.Key() == tcell.KeyBackspace2 {
-						text := renameInput.GetText()
-						if len(text) < 2 {
-							buckets.Clear()
-							for _, val := range initialBuckets {
-								buckets.AddItem(val, "", 0, nil)
-							}
-						} else {
-							results := fuzzy.Find(text, initialBuckets)
-							buckets.Clear()
-							for _, val := range results {
-								buckets.AddItem(val.Str, "", 0, nil)
-							}
-						}
-					} else if event.Key() == tcell.KeyDown {
-						ScrollDown(buckets)
-						// count := buckets.GetItemCount()
-						// index := buckets.GetCurrentItem()
-						// index += 1
-						// buckets.SetCurrentItem(index % count)
-					} else if event.Key() == tcell.KeyUp {
-						ScrollUp(buckets)
-						// count := buckets.GetItemCount()
-						// index := buckets.GetCurrentItem()
-						// index -= 1
-						// buckets.SetCurrentItem(index % count)
-					} else if event.Key() == tcell.KeyEnter {
-						if buckets.GetItemCount() == 0 {
-							for _, val := range initialBuckets {
-								buckets.AddItem(val, "", 0, nil)
-							}
-							footer := createDefaultFooter(envName)
-							grid := CreateDefaultGrid(buckets, files, preview, footer)
-							app.SetRoot(grid, true).SetFocus(buckets)
-							return event
-						}
-						text, _ := buckets.GetItemText(buckets.GetCurrentItem())
-						buckets.Clear()
-						for _, val := range initialBuckets {
-							buckets.AddItem(val, "", 0, nil)
-						}
-						targetIndex = -1
-						for i := 0; i < buckets.GetItemCount(); i++ {
-							mainText, _ := buckets.GetItemText(i)
-							if mainText == text {
-								targetIndex = i
-								buckets.SetCurrentItem(targetIndex)
-								break
-							}
-						}
-
-						footer := createDefaultFooter(envName)
-						grid := CreateDefaultGrid(buckets, files, preview, footer)
-
-						app.SetRoot(grid, true).SetFocus(buckets)
-
-						if targetIndex != -1 {
-							buckets.SetCurrentItem(targetIndex)
-							app.QueueEvent(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
-						}
-					} else if event.Key() == tcell.KeyEscape {
-
-						buckets.Clear()
-						for _, val := range initialBuckets {
-							buckets.AddItem(val, "", 0, nil)
-						}
-
-						footer := createDefaultFooter(envName)
-						grid := CreateDefaultGrid(buckets, files, preview, footer)
-
-						app.SetRoot(grid, true).SetFocus(buckets)
-					}
-
-					return event
-				})
-			}
+				if currentFocus == "buckets" {
+					FuzzyFind(renameInput, buckets, initialBuckets, buckets, files, preview)
+				} else if currentFocus == "files" {
+					FuzzyFind(renameInput, files, initialFiles, buckets, files, preview)
+				} else {
+					fmt.Println("Focus is not on a tview.List")
+				}
 
 		case tcell.KeyCtrlQ:
 			modal := tview.NewModal().
