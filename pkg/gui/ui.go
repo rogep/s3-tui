@@ -409,6 +409,7 @@ func S3Gui(s *awslib.S3Handler, envName string) {
 				} else {
 					fmt.Println("Focus is not on a tview.List")
 				}
+			}
 
 		case tcell.KeyCtrlQ:
 			modal := tview.NewModal().
