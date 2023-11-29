@@ -28,7 +28,7 @@ var (
 func CreateGridWithSearch(buckets *tview.List, files *tview.List, preview *tview.TextView, footer *tview.InputField) *tview.Grid {
 	grid := tview.NewGrid().
 		SetRows(1, 0, 1).
-		SetColumns(50, 50, 0).
+		SetColumns(0, -2, 0).
 		SetBorders(false).
 		AddItem(tview.NewTextView().
 			SetTextAlign(tview.AlignLeft).
@@ -46,7 +46,7 @@ func CreateGridWithSearch(buckets *tview.List, files *tview.List, preview *tview
 func CreateDefaultGrid(buckets *tview.List, files *tview.List, preview *tview.TextView, footer *tview.TextView) *tview.Grid {
 	grid := tview.NewGrid().
 		SetRows(1, 0, 1).
-		SetColumns(50, 50, 0).
+		SetColumns(0, -2, 0).
 		SetBorders(false).
 		AddItem(tview.NewTextView().
 			SetTextAlign(tview.AlignLeft).
@@ -175,6 +175,9 @@ func S3Gui(s *awslib.S3Handler, envName string) {
 	})
 
 	files.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if files.GetItemCount() == 0 {
+			return event
+		}
 		currentFocus = "files"
 		selectedItemIndex := files.GetCurrentItem()
 		selectedKey, _ := files.GetItemText(selectedItemIndex)
