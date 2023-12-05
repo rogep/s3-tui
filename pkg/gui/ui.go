@@ -28,7 +28,7 @@ var (
 func CreateGridWithSearch(buckets *tview.List, files *tview.List, preview *tview.TextView, footer *tview.InputField) *tview.Grid {
 	grid := tview.NewGrid().
 		SetRows(1, 0, 1).
-		SetColumns(0, -2, 0).
+		SetColumns(0, 0, 0).
 		SetBorders(false).
 		AddItem(tview.NewTextView().
 			SetTextAlign(tview.AlignLeft).
